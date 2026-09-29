@@ -8,15 +8,20 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
+    "generate:kanji-strokes": "node scripts/extract-kanjivg.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "^3.1.1",
     "expo": "~57.0.0",
     "react": "19.2.3",
-    "react-native": "0.86.0"
+    "react-native": "0.86.0",
+    "react-native-svg": "^15.15.5"
   },
   "devDependencies": {
+    "@madcat/kanjivg": "^5.0.0",
     "@types/react": "~19.2.0",
+    "svg-path-properties": "^2.1.0",
     "typescript": "~5.9.2"
   }
 }

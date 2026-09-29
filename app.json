@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Kanji Study",
+    "slug": "kanji-study",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "kanjistudy",
+    "ios": { "supportsTablet": true },
+    "android": { "adaptiveIcon": { "backgroundColor": "#ffffff" } },
+    "web": { "bundler": "metro" }
+  }
+}

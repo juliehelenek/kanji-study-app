@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { KeyboardAvoidingView, PanResponder, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import Svg, { Polyline } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Kanji, KanjiProgress, ReviewTrack, starterKanji } from './data';
+import { Kanji, KanjiProgress, ReviewTrack, TextbookStage, kanjiList, sortByTextbookOrder } from './data';
 import kanjiStrokes from './kanjiStrokes.json';
 
 type Point = { x: number; y: number };
@@ -43,7 +43,7 @@ const tabs: { id: Tab; label: string }[] = [
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('overview');
-  const [kanji, setKanji] = useState<Kanji[]>(() => starterKanji.map(withProgress));
+  const [kanji, setKanji] = useState<Kanji[]>(() => kanjiList.map(withProgress));
   const [progressLoaded, setProgressLoaded] = useState(false);
   const [selected, setSelected] = useState(0);
   const current = kanji[selected] ?? kanji[0];
@@ -52,7 +52,24 @@ export default function App() {
 
   useEffect(() => {
     AsyncStorage.getItem(PROGRESS_STORAGE_KEY).then(saved => {
-      if (saved) setKanji(JSON.parse(saved).map(withProgress));
+      if (saved) {
+        const savedKanji: Kanji[] = JSON.parse(saved).map(withProgress);
+        const savedByCharacter = new Map(savedKanji.map(item => [item.character, item] as const));
+        const textbookCharacters = new Set(kanjiList.map(item => item.character));
+        const textbookDeck = kanjiList.map(item => {
+          const savedItem = savedByCharacter.get(item.character);
+          return savedItem ? {
+            ...item,
+            ...savedItem,
+            keyword: item.keyword,
+            onyomi: item.onyomi,
+            kunyomi: item.kunyomi,
+            textbookId: item.textbookId,
+          } : withProgress(item);
+        });
+        const customKanji = savedKanji.filter(item => !textbookCharacters.has(item.character));
+        setKanji([...textbookDeck, ...customKanji]);
+      }
     }).catch(() => {}).finally(() => setProgressLoaded(true));
   }, []);
   useEffect(() => {
@@ -71,6 +88,11 @@ export default function App() {
       return { ...k, status, progress: { ...progress, [skill]: track } };
     }));
   };
+  const recordTextbookStage = (character: string, stage: TextbookStage) => {
+    setKanji(items => items.map(item => item.character === character
+      ? { ...item, textbookProgress: { ...item.textbookProgress, [stage]: true } }
+      : item));
+  };
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -81,7 +103,7 @@ export default function App() {
 
       <View style={styles.content}>
         {tab === 'overview' && <OverviewScreen kanji={kanji} selected={selected} setSelected={setSelected} onSaveVocabulary={(character, vocab) => setKanji(items => items.map(k => k.character === character ? { ...k, vocab } : k))} onStartStudy={() => setTab('learn')} />}
-        {tab === 'learn' && <PipelineScreen kanji={kanji} onReview={recordReview} onOpenDeck={() => setTab('overview')} onOpenPractice={() => setTab('practice')} />}
+        {tab === 'learn' && <PipelineScreen kanji={kanji} onReview={recordReview} onCompleteTextbookStage={recordTextbookStage} onOpenDeck={() => setTab('overview')} onOpenPractice={() => setTab('practice')} />}
         {tab === 'practice' && <PracticeScreen kanji={kanji} current={current} selected={selected} next={next} />}
         {tab === 'settings' && <SettingsScreen onAdd={(k) => { setKanji((items) => [...items, withProgress(k)]); setSelected(kanji.length); setTab('overview'); }} />}
       </View>
@@ -359,11 +381,37 @@ function MnemonicScreen({ current, kanji, fixedPrompt, hideProgress = false, com
   </ScrollView>;
 }
 
-function PipelineScreen({ kanji, onReview, onOpenDeck, onOpenPractice }: { kanji: Kanji[]; onReview: (character: string, skill: keyof KanjiProgress, passed: boolean, usedLifeline?: boolean) => void; onOpenDeck: () => void; onOpenPractice: () => void }) {
+const TEXTBOOK_BATCH_SIZE = 8;
+
+function orderedTextbookKanji(kanji: Kanji[]) {
+  return sortByTextbookOrder(kanji.filter(card => card.textbookId !== undefined));
+}
+
+function textbookStagesFor(card: Kanji): TextbookStage[] {
+  return [
+    'mnemonic', 'meaning', 'writing',
+    ...(card.onyomi.length || card.kunyomi.length ? ['reading' as const] : []),
+    ...(card.vocab.length ? ['vocabulary' as const] : []),
+    'recall',
+  ];
+}
+
+function isTextbookCardComplete(card: Kanji) {
+  return textbookStagesFor(card).every(stage => card.textbookProgress?.[stage]);
+}
+
+function firstIncompleteTextbookIndex(kanji: Kanji[]) {
+  const ordered = orderedTextbookKanji(kanji);
+  const incompleteIndex = ordered.findIndex(card => !isTextbookCardComplete(card));
+  return incompleteIndex < 0 ? ordered.length : Math.floor(incompleteIndex / TEXTBOOK_BATCH_SIZE) * TEXTBOOK_BATCH_SIZE;
+}
+
+function PipelineScreen({ kanji, onReview, onCompleteTextbookStage, onOpenDeck, onOpenPractice }: { kanji: Kanji[]; onReview: (character: string, skill: keyof KanjiProgress, passed: boolean, usedLifeline?: boolean) => void; onCompleteTextbookStage: (character: string, stage: TextbookStage) => void; onOpenDeck: () => void; onOpenPractice: () => void }) {
   type LearnSkill = 'mnemonic' | 'writing' | 'reading';
   type QueueItem = { skill: LearnSkill; card: Kanji };
   const [session, setSession] = useState<{ label: 'reviews' | 'new'; items: QueueItem[] }>();
   const [sessionIndex, setSessionIndex] = useState(0);
+  const [textbookMode, setTextbookMode] = useState(false);
   const dueReviews: QueueItem[] = [
     ...kanji.filter(k => k.status === 'new' && ((k.progress?.mnemonic.successes ?? 0) > 0 || (k.progress?.mnemonic.lapses ?? 0) > 0) && isDue(k, 'mnemonic')).map(card => ({ skill: 'mnemonic' as const, card })),
     ...kanji.filter(k => (k.status === 'unfamiliar' || k.status === 'mastered') && isDue(k, 'writing')).map(card => ({ skill: 'writing' as const, card })),
@@ -377,6 +425,7 @@ function PipelineScreen({ kanji, onReview, onOpenDeck, onOpenPractice }: { kanji
     onReview(item.card.character, item.skill, passed, usedLifeline);
     setSessionIndex(index => index + 1);
   };
+  if (textbookMode) return <TextbookSequenceScreen kanji={kanji} onReview={onReview} onCompleteStage={onCompleteTextbookStage} onExit={() => setTextbookMode(false)} />;
   const prompt = session?.items[sessionIndex];
   if (session && !prompt) return <ScrollView contentContainerStyle={styles.scroll}>
     <Text style={styles.h1}>Session complete</Text>
@@ -393,11 +442,140 @@ function PipelineScreen({ kanji, onReview, onOpenDeck, onOpenPractice }: { kanji
     return skills.map(skill => card.progress?.[skill].nextReviewAt ?? 0).filter(at => at > now);
   });
   const nextReviewAt = upcoming.length ? Math.min(...upcoming) : undefined;
+  const orderedTextbook = orderedTextbookKanji(kanji);
+  const textbookStart = firstIncompleteTextbookIndex(kanji);
+  const textbookBatch = orderedTextbook.slice(textbookStart, textbookStart + TEXTBOOK_BATCH_SIZE);
+  const textbookBatchNumber = Math.floor(textbookStart / TEXTBOOK_BATCH_SIZE) + 1;
+  const textbookLabel = textbookBatch.length
+    ? `Batch ${textbookBatchNumber} · kanji ${textbookBatch[0].textbookId}–${textbookBatch[textbookBatch.length - 1].textbookId}`
+    : 'All textbook batches complete';
   return <ScrollView contentContainerStyle={styles.scroll}><Text style={styles.h1}>Study</Text><Text style={styles.body}>Choose what you want to work on. Each session shows its queue and moves through the items in order.</Text>
+    <View style={styles.feedback}><Text style={styles.feedbackTitle}>Textbook order · {textbookLabel}</Text><Text style={styles.body}>{textbookBatch.length ? 'Learn the next group of up to eight in textbook order: mnemonic, meaning, writing, readings, vocabulary, and recall.' : 'You have completed a first pass through the textbook sequence. You can still review it in order.'}</Text><Pressable style={styles.primary} onPress={() => setTextbookMode(true)}><Text style={styles.primaryText}>{textbookBatch.length ? 'Start textbook batch' : 'Review textbook sequence'}</Text></Pressable></View>
     <View style={styles.feedback}><Text style={styles.feedbackTitle}>Due reviews · {dueReviews.length}</Text><Text style={styles.body}>{dueReviews.length ? 'Review kanji ready for mnemonic, writing, or reading practice.' : nextReviewAt ? `Nothing due yet. Next review: ${new Date(nextReviewAt).toLocaleString()}.` : 'No reviews are due right now.'}</Text><Pressable disabled={!dueReviews.length} style={[styles.primary, !dueReviews.length && styles.disabledButton]} onPress={() => startSession('reviews', shuffled(dueReviews))}><Text style={styles.primaryText}>Start due reviews{dueReviews.length ? ` (${dueReviews.length})` : ''}</Text></Pressable></View>
     <View style={styles.feedback}><Text style={styles.feedbackTitle}>New kanji · {newKanji.length}</Text><Text style={styles.body}>Try to recall each meaning before revealing its answer and mnemonic.</Text><Pressable disabled={!newKanji.length} style={[styles.primary, !newKanji.length && styles.disabledButton]} onPress={() => startSession('new', newKanji.map(card => ({ skill: 'mnemonic', card })))}><Text style={styles.primaryText}>Learn new kanji{newKanji.length ? ` (${newKanji.length})` : ''}</Text></Pressable></View>
     {blockedReadingCards.length > 0 && <View style={styles.feedback}><Text style={styles.feedbackTitle}>Reading reviews waiting for examples</Text><Text style={styles.body}>{blockedReadingCards.map(k => k.character).join('、')} {blockedReadingCards.length === 1 ? 'needs' : 'need'} vocabulary before reading practice can be scheduled. Add examples from the Deck tab.</Text><Pressable style={styles.secondaryButton} onPress={onOpenDeck}><Text style={styles.secondaryText}>Open deck</Text></Pressable></View>}
     <Text style={styles.sectionLabel}>Keep practicing</Text><Text style={styles.body}>Choose a writing, reading, recall, or mixed practice session, or browse your kanji deck.</Text><Pressable style={styles.primary} onPress={onOpenPractice}><Text style={styles.primaryText}>Choose practice mode</Text></Pressable></ScrollView>;
+}
+
+function TextbookSequenceScreen({ kanji, onReview, onCompleteStage, onExit }: { kanji: Kanji[]; onReview: (character: string, skill: keyof KanjiProgress, passed: boolean, usedLifeline?: boolean) => void; onCompleteStage: (character: string, stage: TextbookStage) => void; onExit: () => void }) {
+  type ReadingQuestion = { value: string; kind: 'On-yomi' | 'Kun-yomi' };
+  type PhaseItem = { card: Kanji; reading?: ReadingQuestion; vocab?: Kanji['vocab'][number] };
+  const ordered = useMemo(() => orderedTextbookKanji(kanji), [kanji]);
+  const [batchStart, setBatchStart] = useState(() => firstIncompleteTextbookIndex(kanji));
+  const [phaseIndex, setPhaseIndex] = useState(0);
+  const [itemIndex, setItemIndex] = useState(0);
+  const batch = ordered.slice(batchStart, batchStart + TEXTBOOK_BATCH_SIZE);
+  const phases: TextbookStage[] = [
+    'mnemonic', 'meaning', 'writing',
+    ...(batch.some(card => card.onyomi.length || card.kunyomi.length) ? ['reading' as const] : []),
+    ...(batch.some(card => card.vocab.length) ? ['vocabulary' as const] : []),
+    'recall',
+  ];
+  const phase = phases[phaseIndex];
+  const phaseItems: PhaseItem[] = phase === 'reading'
+    ? batch.flatMap(card => [
+      ...card.onyomi.map(value => ({ card, reading: { value, kind: 'On-yomi' as const } })),
+      ...card.kunyomi.map(value => ({ card, reading: { value, kind: 'Kun-yomi' as const } })),
+    ])
+    : phase === 'vocabulary'
+      ? batch.flatMap(card => card.vocab.map(vocab => ({ card, vocab })))
+      : batch.map(card => ({ card }));
+  const currentItem = phaseItems[itemIndex];
+  const current = currentItem?.card;
+  const isComplete = phaseIndex >= phases.length;
+  const batchNumber = Math.floor(batchStart / TEXTBOOK_BATCH_SIZE) + 1;
+  const phaseNames: Record<TextbookStage, string> = {
+    mnemonic: 'Learn the mnemonic', meaning: 'Meaning check', writing: 'Write the kanji',
+    reading: 'Reading check', vocabulary: 'Vocabulary check', recall: 'Recall the kanji',
+  };
+  const [stageResults, setStageResults] = useState<Record<number, boolean>>({});
+
+  const advance = (passed = true, usedLifeline = false) => {
+    if (!current || !phase) return;
+    const textbookId = current.textbookId ?? -1;
+    const accumulatedPassed = (stageResults[textbookId] ?? true) && passed;
+    const nextItem = phaseItems[itemIndex + 1];
+    const finishingCard = !nextItem || nextItem.card.textbookId !== current.textbookId;
+    if (finishingCard) {
+      onCompleteStage(current.character, phase);
+      if (phase === 'meaning') onReview(current.character, 'mnemonic', accumulatedPassed);
+      if (phase === 'writing') onReview(current.character, 'writing', accumulatedPassed, usedLifeline);
+      if (phase === 'reading') onReview(current.character, 'reading', accumulatedPassed, usedLifeline);
+      setStageResults(previous => { const result = { ...previous }; delete result[textbookId]; return result; });
+    } else {
+      setStageResults(previous => ({ ...previous, [textbookId]: accumulatedPassed }));
+    }
+    if (itemIndex + 1 < phaseItems.length) setItemIndex(index => index + 1);
+    else { setItemIndex(0); setPhaseIndex(index => index + 1); }
+  };
+
+  const startNextBatch = () => {
+    const nextStart = firstIncompleteTextbookIndex(kanji);
+    setBatchStart(nextStart < ordered.length ? nextStart : 0);
+    setPhaseIndex(0);
+    setItemIndex(0);
+  };
+
+  if (isComplete || !batch.length) return <ScrollView contentContainerStyle={styles.scroll}>
+    <Text style={styles.h1}>{batch.length ? `Batch ${batchNumber} complete` : 'Textbook sequence complete'}</Text>
+    <Text style={styles.body}>{batch.length ? `You finished the first pass for kanji ${batch[0].textbookId}–${batch[batch.length - 1].textbookId}.` : `You have completed a first pass through all ${ordered.length} textbook kanji.`}</Text>
+    <Pressable style={styles.primary} onPress={startNextBatch}><Text style={styles.primaryText}>{firstIncompleteTextbookIndex(kanji) < ordered.length ? 'Continue to next batch' : 'Review the first batch'}</Text></Pressable>
+    <Pressable style={styles.secondaryButton} onPress={onExit}><Text style={styles.secondaryText}>Back to study</Text></Pressable>
+  </ScrollView>;
+
+  if (!current || !phase || !currentItem) return null;
+  return <View style={styles.content}>
+    <View style={styles.mixedHeader}>
+      <Text style={styles.reading}>Textbook batch {batchNumber} · kanji {current.textbookId} · {phaseNames[phase]} · {itemIndex + 1} of {phaseItems.length}</Text>
+      <Pressable onPress={onExit}><Text style={styles.removeText}>Exit sequence</Text></Pressable>
+    </View>
+    {phase === 'mnemonic' ? <ScrollView contentContainerStyle={styles.scroll}>
+      <Text style={styles.h1}>Learn the mnemonic</Text>
+      <Text style={styles.body}>Take a moment to connect the character with its meaning.</Text>
+      <Text style={styles.quizKanji}>{current.character}</Text>
+      <Text style={styles.h2}>{current.keyword}</Text>
+      <View style={styles.mnemonicCard}><Text style={styles.body}>{current.mnemonic}</Text></View>
+      <Pressable style={styles.primary} onPress={() => advance()}><Text style={styles.primaryText}>Got it · practice the meaning</Text></Pressable>
+    </ScrollView> : null}
+    {phase === 'meaning' || phase === 'reading' || phase === 'vocabulary' || phase === 'recall'
+      ? <TextbookQuizScreen key={`${phase}-${current.textbookId}-${itemIndex}`} kind={phase} current={current} kanji={kanji} readingItem={currentItem.reading} vocabItem={currentItem.vocab} onAnswer={advance} />
+      : null}
+    {phase === 'writing' && <WriteScreen key={`textbook-write-${current.character}`} current={current} next={() => {}} onReview={(passed, usedLifeline) => advance(passed, usedLifeline)} />}
+  </View>;
+}
+
+function TextbookQuizScreen({ kind, current, kanji, readingItem, vocabItem, onAnswer }: { kind: 'meaning' | 'reading' | 'vocabulary' | 'recall'; current: Kanji; kanji: Kanji[]; readingItem?: { value: string; kind: 'On-yomi' | 'Kun-yomi' }; vocabItem?: Kanji['vocab'][number]; onAnswer: (passed: boolean) => void }) {
+  const [selected, setSelected] = useState('');
+  const [revealed, setRevealed] = useState(false);
+  const correctAnswer = kind === 'meaning' ? current.keyword
+    : kind === 'reading' ? readingItem?.value ?? ''
+      : kind === 'vocabulary' ? vocabItem?.meaning ?? '' : current.character;
+  const prompt = kind === 'meaning' ? 'What does this kanji mean?'
+    : kind === 'reading' ? `Which ${readingItem?.kind.toLowerCase() ?? ''} reading belongs to this kanji?`
+      : kind === 'vocabulary' ? 'Choose the meaning of this vocabulary word.'
+        : 'Which kanji matches this meaning?';
+  const stimulus = kind === 'meaning' || kind === 'reading' ? current.character
+    : kind === 'vocabulary' ? vocabItem?.word ?? '' : current.keyword;
+  const options = useMemo(() => {
+    const distractors = kanji.flatMap(card => kind === 'meaning' ? [card.keyword]
+      : kind === 'reading' ? [...card.onyomi, ...card.kunyomi]
+        : kind === 'vocabulary' ? card.vocab.map(item => item.meaning) : [card.character]);
+    const uniqueDistractors = Array.from(new Set(distractors.filter(answer => answer && answer !== correctAnswer)));
+    return shuffled([correctAnswer, ...shuffled(uniqueDistractors).slice(0, 3)]);
+  }, [correctAnswer, kanji, kind]);
+  const isCorrect = selected === correctAnswer;
+
+  return <ScrollView contentContainerStyle={styles.scroll}>
+    <Text style={styles.h1}>{prompt}</Text>
+    <Text style={styles.quizKanji}>{stimulus}</Text>
+    {kind === 'vocabulary' && vocabItem?.reading ? <Text style={styles.reading}>{vocabItem.reading}</Text> : null}
+    {!revealed && options.map(option => <Pressable key={option} style={[styles.answerOption, selected === option && styles.answerOptionSelected]} onPress={() => setSelected(option)}><Text style={[styles.keyword, kind === 'recall' && styles.answerKanji]}>{option}</Text></Pressable>)}
+    {revealed && <View style={styles.feedback}>
+      <Text style={styles.feedbackTitle}>{isCorrect ? 'Correct!' : `Not quite · ${correctAnswer}`}</Text>
+      {kind === 'meaning' && <Text style={styles.body}>{current.mnemonic}</Text>}
+    </View>}
+    <Pressable disabled={!revealed && !selected} style={[styles.primary, !revealed && !selected && styles.disabledButton]} onPress={revealed ? () => onAnswer(isCorrect) : () => setRevealed(true)}><Text style={styles.primaryText}>{revealed ? 'Continue' : 'Check answer'}</Text></Pressable>
+  </ScrollView>;
 }
 
 type ReviewMode = 'write' | 'read' | 'mnemonic';

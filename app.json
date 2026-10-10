@@ -8,6 +8,7 @@
     "scheme": "kanjistudy",
     "ios": { "supportsTablet": true },
     "android": { "adaptiveIcon": { "backgroundColor": "#ffffff" } },
-    "web": { "bundler": "metro" }
+    "web": { "bundler": "metro" },
+    "experiments": { "baseUrl": "/kanji-study-app" }
   }
 }

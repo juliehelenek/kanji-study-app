@@ -1,0 +1,26 @@
+{
+  "id": "/kanji-study-app/",
+  "name": "Kanji Study",
+  "short_name": "Kanji Study",
+  "description": "A personal deck for studying kanji.",
+  "start_url": "/kanji-study-app/",
+  "scope": "/kanji-study-app/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f1f7fb",
+  "theme_color": "#398fc5",
+  "icons": [
+    {
+      "src": "/kanji-study-app/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/kanji-study-app/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

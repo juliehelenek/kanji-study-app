@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, PanResponder, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import Svg, { Polyline } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Kanji, KanjiProgress, ReviewTrack, starterKanji } from './data';
@@ -81,7 +81,7 @@ export default function App() {
 
       <View style={styles.content}>
         {tab === 'overview' && <OverviewScreen kanji={kanji} selected={selected} setSelected={setSelected} onSaveVocabulary={(character, vocab) => setKanji(items => items.map(k => k.character === character ? { ...k, vocab } : k))} onStartStudy={() => setTab('learn')} />}
-        {tab === 'learn' && <PipelineScreen kanji={kanji} current={current} onReview={recordReview} onOpenDeck={() => setTab('overview')} onOpenPractice={() => setTab('practice')} />}
+        {tab === 'learn' && <PipelineScreen kanji={kanji} onReview={recordReview} onOpenDeck={() => setTab('overview')} onOpenPractice={() => setTab('practice')} />}
         {tab === 'practice' && <PracticeScreen kanji={kanji} current={current} selected={selected} next={next} />}
         {tab === 'settings' && <SettingsScreen onAdd={(k) => { setKanji((items) => [...items, withProgress(k)]); setSelected(kanji.length); setTab('overview'); }} />}
       </View>
@@ -115,7 +115,7 @@ function OverviewScreen({ kanji, selected, setSelected, onSaveVocabulary, onStar
   const quickAnswerCorrect = !!kanji[selected] && kanji[selected].keyword.split('/').some(keyword => answer.trim().toLocaleLowerCase() === keyword.trim().toLocaleLowerCase());
   return <ScrollView contentContainerStyle={styles.scroll}>
     <Text style={styles.h1}>Your study deck</Text>
-    <View style={styles.feedback}><Text style={styles.feedbackTitle}>{dueCount ? `${dueCount} ${dueCount === 1 ? 'review' : 'reviews'} ready` : 'You’re all caught up'}</Text><Text style={styles.body}>{dueCount ? 'Pick up where your study plan needs you next.' : 'Keep exploring your deck, or come back when the next review is due.'}</Text><Pressable style={styles.primary} onPress={onStartStudy}><Text style={styles.primaryText}>{dueCount ? 'Start studying' : 'Open study'}</Text></Pressable></View>
+    <View style={styles.feedback}><Text style={styles.feedbackTitle}>{dueCount ? `${dueCount} study ${dueCount === 1 ? 'item' : 'items'} ready` : 'You’re all caught up'}</Text><Text style={styles.body}>{dueCount ? 'Due reviews and new kanji are ready when you are.' : 'Keep exploring your deck, or come back when the next review is due.'}</Text><Pressable style={styles.primary} onPress={onStartStudy}><Text style={styles.primaryText}>{dueCount ? 'Start studying' : 'Open study'}</Text></Pressable></View>
     {!!kanji[selected] && <View style={styles.feedback}><Text style={styles.sectionLabel}>Quick recall</Text><Text style={styles.quizKanji}>{kanji[selected].character}</Text>{!revealed ? <TextInput style={styles.input} value={answer} onChangeText={setAnswer} placeholder="Enter one meaning" /> : <><Text style={styles.feedbackTitle}>{quickAnswerCorrect ? 'Correct!' : 'Review this meaning'}</Text><Text style={styles.body}>Answer: {kanji[selected].keyword.replaceAll(' / ', ', ')}</Text></>}
     <Pressable disabled={!revealed && !answer.trim()} style={[styles.primary, !revealed && !answer.trim() && styles.disabledButton]} onPress={() => { if (!revealed) setRevealed(true); else { setAnswer(''); setRevealed(false); setSelected((selected + 1) % kanji.length); } }}><Text style={styles.primaryText}>{revealed ? 'Next kanji' : 'Check answer'}</Text></Pressable></View>}
     <Text style={styles.sectionLabel}>Study deck</Text>
@@ -146,21 +146,23 @@ function VocabularyEditor({ character, initialVocabulary, onSave }: { character:
   </View>;
 }
 
-function WriteScreen({ current, next, onReview }: { current: Kanji; next: () => void; onReview?: (passed: boolean, usedLifeline: boolean) => void }) {
+function WriteScreen({ current, next, onReview, compact = false }: { current: Kanji; next: () => void; onReview?: (passed: boolean, usedLifeline: boolean) => void; compact?: boolean }) {
   const targetStrokes = guideData[current.character];
   const [showExample, setShowExample] = useState(false);
   const [drawing, setDrawing] = useState(false);
   const [padSize, setPadSize] = useState({ width: 0, height: 0 });
   const [strokes, setStrokes] = useState<Point[][]>([]);
-  const [feedback, setFeedback] = useState('Draw the highlighted stroke in one continuous motion.');
+  const [feedback, setFeedback] = useState('Draw the first stroke from memory in one continuous motion.');
+  const [showStrokeHint, setShowStrokeHint] = useState(false);
   const [usedLifeline, setUsedLifeline] = useState(false);
   const [showMnemonic, setShowMnemonic] = useState(false);
   const accepted = useRef<Point[][]>([]);
   const activeStroke = useRef<Point[]>([]);
   const padSizeRef = useRef(padSize);
   const acceptedCount = useRef(0);
-  const latest = useRef({ targetStrokes, acceptedCount, accepted, setStrokes, setFeedback, setDrawing });
-  latest.current = { targetStrokes, acceptedCount, accepted, setStrokes, setFeedback, setDrawing };
+  const latest = useRef({ targetStrokes, acceptedCount, accepted, setStrokes, setFeedback, setDrawing, setShowStrokeHint });
+  latest.current = { targetStrokes, acceptedCount, accepted, setStrokes, setFeedback, setDrawing, setShowStrokeHint };
+  const canDraw = () => !latest.current.targetStrokes || latest.current.acceptedCount.current < latest.current.targetStrokes.length;
   const toGuidePoint = (point: Point): Point => {
     const { width, height } = padSizeRef.current;
     const scale = Math.min(width, height) / GUIDE_SIZE;
@@ -168,11 +170,12 @@ function WriteScreen({ current, next, onReview }: { current: Kanji; next: () => 
     return { x: (point.x - (width - GUIDE_SIZE * scale) / 2) / scale, y: (point.y - (height - GUIDE_SIZE * scale) / 2) / scale };
   };
   const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponderCapture: () => true,
-    onMoveShouldSetPanResponderCapture: () => true,
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: canDraw,
+    onMoveShouldSetPanResponderCapture: canDraw,
+    onStartShouldSetPanResponder: canDraw,
+    onMoveShouldSetPanResponder: canDraw,
     onPanResponderGrant: event => {
+      if (!canDraw()) return;
       const point = toGuidePoint({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY });
       activeStroke.current = [point];
       latest.current.setDrawing(true);
@@ -215,36 +218,42 @@ function WriteScreen({ current, next, onReview }: { current: Kanji; next: () => 
         latest.current.accepted.current = completed;
         latest.current.acceptedCount.current = index + 1;
         latest.current.setStrokes(completed);
+        latest.current.setShowStrokeHint(false);
         latest.current.setFeedback(index + 1 === targets.length ? `Correct — all ${targets.length} strokes complete!` : `Correct stroke ${index + 1} of ${targets.length}. Now draw stroke ${index + 2}.`);
       } else {
         const reverseScore = compareStroke(path, [...expected].reverse());
         const laterMatch = targets.slice(index + 1).some(stroke => compareStroke(path, stroke.map(([x, y]) => ({ x, y }))) < 0.21);
-        const reason = reverseScore < 0.21 ? 'The shape is close, but the direction is reversed.' : laterMatch ? 'That looks like a later stroke. Check the stroke order.' : 'The stroke shape or position is off. Follow the highlighted guide.';
+        const reason = reverseScore < 0.21 ? 'The shape is close, but the direction is reversed.' : laterMatch ? 'That looks like a later stroke. Check the stroke order.' : 'The stroke shape or position is off.';
         latest.current.setStrokes([...latest.current.accepted.current, path]);
-        latest.current.setFeedback(`${reason} Try stroke ${index + 1} again.`);
+        latest.current.setShowStrokeHint(true);
+        latest.current.setFeedback(`${reason} The hint for stroke ${index + 1} is shown now. Try again.`);
       }
       activeStroke.current = [];
     },
     onPanResponderTerminate: () => { activeStroke.current = []; latest.current.setDrawing(false); },
     onPanResponderTerminationRequest: () => false,
   }), []);
-  const moveNext = (selfRatedPass?: boolean) => { const complete = targetStrokes ? acceptedCount.current >= targetStrokes.length : selfRatedPass === true; onReview?.(complete, usedLifeline); setStrokes([]); activeStroke.current = []; accepted.current = []; acceptedCount.current = 0; setFeedback('Draw the highlighted stroke in one continuous motion.'); setShowExample(false); setShowMnemonic(false); setUsedLifeline(false); next(); };
-  const clear = () => { setStrokes([]); activeStroke.current = []; accepted.current = []; acceptedCount.current = 0; setFeedback('Draw the highlighted stroke in one continuous motion.'); };
-  return <ScrollView scrollEnabled={!drawing} contentContainerStyle={styles.scroll}>
-    <Text style={styles.h1}>Write the kanji</Text><Text style={styles.body}>Practice “{current.keyword}” stroke by stroke. Start with the highlighted path, following its shape and direction.</Text>
+  const moveNext = (selfRatedPass?: boolean) => { const complete = targetStrokes ? acceptedCount.current >= targetStrokes.length : selfRatedPass === true; onReview?.(complete, usedLifeline); setStrokes([]); activeStroke.current = []; accepted.current = []; acceptedCount.current = 0; setFeedback('Draw the first stroke from memory in one continuous motion.'); setShowStrokeHint(false); setShowExample(false); setShowMnemonic(false); setUsedLifeline(false); next(); };
+  const clear = () => { setStrokes([]); activeStroke.current = []; accepted.current = []; acceptedCount.current = 0; setShowStrokeHint(false); setFeedback('Draw the first stroke from memory in one continuous motion.'); };
+  return <View style={styles.content}><ScrollView scrollEnabled={!drawing && !compact} contentContainerStyle={[styles.scroll, compact && styles.compactWritingScroll]}>
+    {!compact && <><Text style={styles.h1}>Write the kanji</Text><Text style={styles.body}>Practice “{current.keyword}” stroke by stroke. Try the first stroke from memory; a hint will appear if you need it.</Text></>}
+    {compact && <View style={styles.compactWritingPrompt}><Text style={styles.compactWritingKeyword}>{current.keyword}</Text></View>}
     {onReview && !targetStrokes && <View style={styles.feedback}><Text style={styles.feedbackTitle}>No stroke guide for this kanji</Text><Text style={styles.body}>You can still practice drawing it, but this attempt needs your self-rating.</Text></View>}
-    <View style={[styles.drawingPad, { touchAction: 'none' } as any]} onLayout={event => { const size = { width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height }; padSizeRef.current = size; setPadSize(size); }} {...panResponder.panHandlers}>
+    <View style={[styles.drawingPad, compact && styles.compactDrawingPad, { touchAction: 'none' } as any]} onLayout={event => { const size = { width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height }; padSizeRef.current = size; setPadSize(size); }} {...panResponder.panHandlers}>
       <Svg pointerEvents="none" width={padSize.width} height={padSize.height} viewBox="0 0 109 109" style={StyleSheet.absoluteFill}>
-        {targetStrokes?.map((stroke, index) => <Polyline key={`guide-${index}`} points={stroke.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke={index === acceptedCount.current ? '#b7c5df' : showExample ? '#d9d5cd' : 'transparent'} strokeWidth={index === acceptedCount.current ? 4 : 2} strokeLinecap="round" strokeLinejoin="round" />)}
+        {targetStrokes?.map((stroke, index) => <Polyline key={`guide-${index}`} points={stroke.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke={showExample ? '#d9d5cd' : acceptedCount.current >= targetStrokes.length ? '#c8d2df' : index === acceptedCount.current && showStrokeHint ? '#b7c5df' : 'transparent'} strokeWidth={showExample ? 2 : acceptedCount.current >= targetStrokes.length ? 3 : index === acceptedCount.current ? 4 : 2} strokeLinecap="round" strokeLinejoin="round" />)}
         {strokes.map((stroke, index) => <Polyline key={`ink-${index}`} points={stroke.map(point => `${point.x},${point.y}`).join(' ')} fill="none" stroke={index < accepted.current.length ? '#34312d' : '#c64d43'} strokeWidth={3.5} strokeLinecap="round" strokeLinejoin="round" />)}
       </Svg>
     </View>
-    <Text style={styles.reading}>{targetStrokes ? `${acceptedCount.current} of ${targetStrokes.length} strokes · ${feedback}` : feedback}</Text>
+    <Text style={[styles.reading, compact && styles.compactWritingStatus]}>{targetStrokes ? `${acceptedCount.current} of ${targetStrokes.length} strokes · ${feedback}` : feedback}</Text>
     {showMnemonic && <View style={styles.feedback}><Text style={styles.feedbackTitle}>Mnemonic lifeline</Text><Text style={styles.body}>{current.mnemonic}</Text></View>}
-    <View style={styles.buttonRow}><Pressable style={styles.secondaryButton} onPress={clear}><Text style={styles.secondaryText}>Clear</Text></Pressable><Pressable style={styles.secondaryButton} onPress={() => setShowExample(value => !value)}><Text style={styles.secondaryText}>{showExample ? 'Hide full guide' : 'Show full guide'}</Text></Pressable></View>
     {onReview && <Pressable style={[styles.secondaryButton, styles.lifelineButton]} onPress={() => { setUsedLifeline(true); setShowMnemonic(true); }}><Text style={styles.secondaryText}>Use mnemonic lifeline</Text></Pressable>}
-    {onReview && !targetStrokes ? <View style={styles.buttonRow}><Pressable style={styles.secondaryButton} onPress={() => moveNext(false)}><Text style={styles.secondaryText}>Need more practice</Text></Pressable><Pressable style={[styles.primary, styles.flexButton]} onPress={() => moveNext(true)}><Text style={styles.primaryText}>I knew it</Text></Pressable></View> : <Pressable style={styles.primary} onPress={() => moveNext()}><Text style={styles.primaryText}>{onReview ? 'Finish writing review' : 'Next kanji'}</Text></Pressable>}
-  </ScrollView>;
+  </ScrollView>
+    <View style={[styles.writeFooter, compact && styles.compactWriteFooter]}>
+      <View style={[styles.buttonRow, compact && styles.compactButtonRow]}><Pressable style={[styles.secondaryButton, compact && styles.compactActionButton]} onPress={clear}><Text style={styles.secondaryText}>Clear</Text></Pressable><Pressable style={[styles.secondaryButton, compact && styles.compactActionButton]} onPress={() => setShowExample(value => !value)}><Text style={styles.secondaryText}>{showExample ? 'Hide full guide' : 'Show full guide'}</Text></Pressable></View>
+      {onReview && !targetStrokes ? <View style={[styles.buttonRow, compact && styles.compactButtonRow]}><Pressable style={[styles.secondaryButton, compact && styles.compactActionButton]} onPress={() => moveNext(false)}><Text style={styles.secondaryText}>Need more practice</Text></Pressable><Pressable style={[styles.primary, styles.flexButton, compact && styles.compactPrimaryButton, { marginTop: 0 }]} onPress={() => moveNext(true)}><Text style={styles.primaryText}>I knew it</Text></Pressable></View> : <Pressable style={[styles.primary, compact && styles.compactPrimaryButton, compact && { marginTop: 0 }]} onPress={() => moveNext()}><Text style={styles.primaryText}>{onReview ? 'Finish writing review' : 'Next kanji'}</Text></Pressable>}
+    </View>
+  </View>;
 }
 
 function compareStroke(user: Point[], target: Point[]) {
@@ -263,7 +272,7 @@ function strokeDistance(user: Point[], target: Point[]) {
   return { forward: compareStroke(user, target), reverse: compareStroke(user, [...target].reverse()) };
 }
 
-function ReadingsScreen({ current, kanji, selected, hideScope = false, onAdvance }: { current: Kanji; kanji: Kanji[]; selected: number; hideScope?: boolean; onAdvance?: (passed: boolean, usedLifeline: boolean) => void }) {
+function ReadingsScreen({ current, kanji, selected, hideScope = false, compact = false, onAdvance }: { current: Kanji; kanji: Kanji[]; selected: number; hideScope?: boolean; compact?: boolean; onAdvance?: (passed: boolean, usedLifeline: boolean) => void }) {
   const [scope, setScope] = useState<'kanji' | 'deck'>('kanji');
   const [deckOrder, setDeckOrder] = useState<Kanji[]>([]);
   const [itemIndex, setItemIndex] = useState(0); const [reading, setReading] = useState(''); const [meaning, setMeaning] = useState(''); const [revealed, setRevealed] = useState(false);
@@ -273,31 +282,40 @@ function ReadingsScreen({ current, kanji, selected, hideScope = false, onAdvance
   const item = items.length ? items[itemIndex % items.length] : null;
   const quizKanji = item?.kanji ?? current;
   const vocab = item?.vocab ?? null;
+  const isNew = quizKanji.status === 'new'; const isUnfamiliar = quizKanji.status === 'unfamiliar';
   const answerIsCorrect = !!vocab && reading.trim() === vocab.reading && (!isFamiliarCheck(quizKanji.status) || meaning.trim().toLocaleLowerCase() === vocab.meaning.toLocaleLowerCase());
+  const canCheck = isNew ? !!reading : !!reading.trim() && (isUnfamiliar || !!meaning.trim());
   const advance = () => { if (onAdvance) { onAdvance(answerIsCorrect, usedLifeline); return; } setItemIndex(i => (i + 1) % Math.max(items.length, 1)); setReading(''); setMeaning(''); setRevealed(false); };
   const changeScope = (newScope: 'kanji' | 'deck') => { setScope(newScope); if (newScope === 'deck') setDeckOrder(shuffled(kanji)); setItemIndex(0); setReading(''); setMeaning(''); setRevealed(false); };
-  const options = vocab ? [...new Set([vocab.reading, ...quizKanji.vocab.map(v => v.reading), ...quizKanji.onyomi, ...quizKanji.kunyomi])].slice(0, 4) : [];
-  const isNew = quizKanji.status === 'new'; const isUnfamiliar = quizKanji.status === 'unfamiliar';
+  const options = useMemo(() => {
+    if (!vocab) return [];
+    const distractors = shuffled([...new Set([
+      ...quizKanji.vocab.map(v => v.reading), ...quizKanji.onyomi, ...quizKanji.kunyomi,
+      ...kanji.flatMap(card => [...card.vocab.map(v => v.reading), ...card.onyomi, ...card.kunyomi]),
+    ].filter(option => option.trim() && option !== vocab.reading))]).slice(0, 3);
+    return shuffled([vocab.reading, ...distractors]);
+  }, [vocab?.reading, quizKanji.character, kanji]);
   const type = vocab && quizKanji.kunyomi.some(r => vocab.reading.includes(r)) ? 'Kun-yomi' : 'On-yomi';
-  return <ScrollView contentContainerStyle={styles.scroll}>
-    <Text style={styles.h1}>Vocabulary readings</Text>
-    {!hideScope && <><Text style={styles.sectionLabel}>Study scope</Text><View style={styles.scopeRow}><Pressable style={[styles.scopeButton, scope === 'kanji' && styles.scopeButtonActive]} onPress={() => changeScope('kanji')}><Text style={[styles.scopeText, scope === 'kanji' && styles.scopeTextActive]}>Selected kanji</Text></Pressable><Pressable style={[styles.scopeButton, scope === 'deck' && styles.scopeButtonActive]} onPress={() => changeScope('deck')}><Text style={[styles.scopeText, scope === 'deck' && styles.scopeTextActive]}>Entire deck ({kanji.length})</Text></Pressable></View></>}
+  return <KeyboardAvoidingView style={styles.content} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.scroll, compact && styles.compactReading]}>
+    {!compact && <Text style={styles.h1}>Vocabulary readings</Text>}
+    {!hideScope && <>{!compact && <Text style={styles.sectionLabel}>Study scope</Text>}<View style={[styles.scopeRow, compact && styles.compactScopeRow]}><Pressable style={[styles.scopeButton, compact && styles.compactScopeButton, scope === 'kanji' && styles.scopeButtonActive]} onPress={() => changeScope('kanji')}><Text style={[styles.scopeText, compact && styles.compactScopeText, scope === 'kanji' && styles.scopeTextActive]}>Selected kanji</Text></Pressable><Pressable style={[styles.scopeButton, compact && styles.compactScopeButton, scope === 'deck' && styles.scopeButtonActive]} onPress={() => changeScope('deck')}><Text style={[styles.scopeText, compact && styles.compactScopeText, scope === 'deck' && styles.scopeTextActive]}>Entire deck ({kanji.length})</Text></Pressable></View></>}
     <Text style={styles.body}>{isNew ? 'Choose the correct reading.' : isUnfamiliar ? 'Use the English meaning as a clue and enter the reading.' : 'Enter the reading and English meaning.'}</Text>
-    {vocab ? <><Text style={styles.quizKanji}>{vocab.word}</Text>
+    {vocab ? <><Text style={compact ? styles.compactReadingWord : styles.quizKanji}>{vocab.word}</Text>
       {isUnfamiliar && <Text style={styles.meaningClue}>Meaning: {vocab.meaning}</Text>}
-      {!revealed && (isNew ? options.map(option => <Pressable key={option} style={[styles.answerOption, reading === option && styles.answerOptionSelected]} onPress={() => setReading(option)}><Text style={styles.body}>{option}</Text></Pressable>) : <><TextInput style={styles.input} value={reading} onChangeText={setReading} placeholder="Reading (ひらがな)" autoCapitalize="none"/>{!isUnfamiliar && <TextInput style={[styles.input, { marginTop: 10 }]} value={meaning} onChangeText={setMeaning} placeholder="English meaning" autoCapitalize="none"/>}</>)}
+      {!revealed && (isNew ? options.map(option => <Pressable key={option} style={[styles.answerOption, compact && styles.compactAnswerOption, reading === option && styles.answerOptionSelected]} onPress={() => setReading(option)}><Text style={styles.body}>{option}</Text></Pressable>) : <><TextInput style={styles.input} value={reading} onChangeText={setReading} placeholder="Reading (ひらがな)" keyboardType="default" autoCapitalize="none" autoCorrect={false} spellCheck={false}/>{!isUnfamiliar && <TextInput style={[styles.input, { marginTop: 10 }]} value={meaning} onChangeText={setMeaning} placeholder="English meaning" autoCapitalize="none"/>}</>)}
       {revealed && <View style={styles.feedback}><Text style={styles.feedbackTitle}>{reading.trim() === vocab.reading ? 'Reading correct!' : `Reading incorrect — ${vocab.reading}`} {isFamiliarCheck(quizKanji.status) && (meaning.trim().toLocaleLowerCase() === vocab.meaning.toLocaleLowerCase() ? 'Meaning correct!' : `Meaning: ${vocab.meaning}`)}</Text><Text style={styles.body}>Kanji: {quizKanji.character} — {quizKanji.keyword}</Text><Text style={styles.body}>Reading: {vocab.reading} ({type})</Text><Text style={styles.body}>Meaning: {vocab.meaning}</Text><Text style={styles.body}>On-yomi: {quizKanji.onyomi.join(' / ') || '—'}</Text><Text style={styles.body}>Kun-yomi: {quizKanji.kunyomi.join(' / ') || '—'}</Text></View>}
       {onAdvance && <Pressable style={styles.secondaryButton} onPress={() => setUsedLifeline(true)}><Text style={styles.secondaryText}>{usedLifeline ? 'Mnemonic lifeline used' : 'Use mnemonic lifeline'}</Text></Pressable>}
       {usedLifeline && <View style={styles.feedback}><Text style={styles.feedbackTitle}>Mnemonic lifeline</Text><Text style={styles.body}>{quizKanji.mnemonic}</Text></View>}
-      <Pressable disabled={!revealed && !(isNew ? !!reading : !!reading.trim() && (isUnfamiliar || !!meaning.trim()))} style={[styles.primary, !revealed && !(isNew ? !!reading : !!reading.trim() && (isUnfamiliar || !!meaning.trim())) && styles.disabledButton]} onPress={revealed ? advance : () => setRevealed(true)}><Text style={styles.primaryText}>{revealed ? (onAdvance ? 'Next review' : 'Next vocabulary') : 'Check answer'}</Text></Pressable>
       <Text style={styles.reading}>Vocabulary {itemIndex + 1} of {items.length}{scope === 'deck' ? ` · ${quizKanji.character}` : ''}</Text>
-    </> : <View style={styles.feedback}><Text style={styles.body}>No example vocabulary yet. Add vocabulary to this kanji to practice readings.</Text>{onAdvance && <Pressable style={styles.primary} onPress={() => onAdvance(false, false)}><Text style={styles.primaryText}>Next review</Text></Pressable>}</View>}
-  </ScrollView>;
+    </> : <View style={styles.feedback}><Text style={styles.body}>No example vocabulary yet. Add vocabulary to this kanji to practice readings.</Text></View>}
+  </ScrollView>
+    {vocab ? <View style={styles.writeFooter}><Pressable disabled={!revealed && !canCheck} style={[styles.primary, { marginTop: 0 }, !revealed && !canCheck && styles.disabledButton]} onPress={revealed ? advance : () => setRevealed(true)}><Text style={styles.primaryText}>{revealed ? (onAdvance ? 'Next review' : 'Next vocabulary') : 'Check answer'}</Text></Pressable></View> : onAdvance ? <View style={styles.writeFooter}><Pressable style={[styles.primary, { marginTop: 0 }]} onPress={() => onAdvance(false, false)}><Text style={styles.primaryText}>Next review</Text></Pressable></View> : null}
+  </KeyboardAvoidingView>;
 }
 
 function isFamiliarCheck(status: Kanji['status']) { return status === 'familiar' || status === 'mastered'; }
 
-function MnemonicScreen({ current, kanji, fixedPrompt, hideProgress = false, onAdvance, studyMode = false, onReview }: { current: Kanji; kanji: Kanji[]; fixedPrompt?: Kanji; hideProgress?: boolean; onAdvance?: () => void; studyMode?: boolean; onReview?: (character: string, skill: keyof KanjiProgress, passed: boolean) => void }) {
+function MnemonicScreen({ current, kanji, fixedPrompt, hideProgress = false, compact = false, onAdvance, studyMode = false, onReview }: { current: Kanji; kanji: Kanji[]; fixedPrompt?: Kanji; hideProgress?: boolean; compact?: boolean; onAdvance?: () => void; studyMode?: boolean; onReview?: (character: string, skill: keyof KanjiProgress, passed: boolean) => void }) {
   const deckOrder = useMemo(() => shuffled(kanji), [kanji]);
   const [itemIndex, setItemIndex] = useState(0);
   const [answer, setAnswer] = useState('');
@@ -310,42 +328,64 @@ function MnemonicScreen({ current, kanji, fixedPrompt, hideProgress = false, onA
   }, [kanji, prompt]);
   const advance = () => { if (onAdvance) { onAdvance(); return; } setItemIndex(i => (i + 1) % Math.max(items.length, 1)); setAnswer(''); setRevealed(false); };
   if (!items.length) return <ScrollView contentContainerStyle={styles.scroll}><Text style={styles.h1}>Kanji mnemonics</Text><Text style={styles.body}>No new kanji are waiting for mnemonic study.</Text></ScrollView>;
-  if (studyMode) return <ScrollView contentContainerStyle={styles.scroll}><Text style={styles.h1}>Kanji mnemonics</Text><Text style={styles.body}>Study the meaning and story, then mark it ready for writing practice.</Text><Text style={styles.quizKanji}>{prompt.character}</Text><Text style={styles.h2}>{prompt.keyword}</Text><View style={styles.mnemonicCard}><Text style={styles.body}>{prompt.mnemonic}</Text></View><Pressable style={styles.primary} onPress={() => { onReview?.(prompt.character, 'mnemonic', true); advance(); }}><Text style={styles.primaryText}>Got it — start writing</Text></Pressable><Text style={styles.reading}>New kanji {itemIndex + 1} of {items.length}</Text></ScrollView>;
-  return <ScrollView contentContainerStyle={styles.scroll}>
-    <Text style={styles.h1}>Recall the kanji</Text>
-    <Text style={styles.body}>Which kanji matches this keyword?</Text><Text style={styles.h2}>{prompt.keyword}</Text>
-    {!revealed && options.map(option => <Pressable key={option.character} style={[styles.answerOption, answer === option.character && styles.answerOptionSelected]} onPress={() => setAnswer(option.character)}><Text style={styles.answerKanji}>{option.character}</Text></Pressable>)}
-    {!revealed && !answer && <Text style={styles.reading}>Choose a kanji to check your answer.</Text>}
+  if (studyMode) {
+    const recalledMeaning = prompt.keyword.split('/').some(keyword => answer.trim().toLocaleLowerCase() === keyword.trim().toLocaleLowerCase());
+    return <ScrollView contentContainerStyle={styles.scroll}>
+      <Text style={styles.h1}>Learn a new kanji</Text>
+      <Text style={styles.body}>Look at the kanji and try to recall its meaning before revealing the answer.</Text>
+      <Text style={styles.quizKanji}>{prompt.character}</Text>
+      {!revealed ? <>
+        <TextInput style={styles.input} value={answer} onChangeText={setAnswer} placeholder="Meaning from memory" autoCapitalize="none" returnKeyType="done" blurOnSubmit onSubmitEditing={() => { if (answer.trim()) setRevealed(true); }} />
+        <Pressable disabled={!answer.trim()} style={[styles.primary, !answer.trim() && styles.disabledButton]} onPress={() => setRevealed(true)}><Text style={styles.primaryText}>Reveal meaning</Text></Pressable>
+      </> : <>
+        <View style={styles.feedback}><Text style={styles.feedbackTitle}>{recalledMeaning ? 'You recalled the meaning.' : `Meaning: ${prompt.keyword}`}</Text><Text style={styles.h2}>{prompt.keyword}</Text><Text style={styles.sectionLabel}>Mnemonic</Text><Text style={styles.body}>{prompt.mnemonic}</Text></View>
+        <Text style={styles.body}>How well did you remember it?</Text>
+        <View style={styles.buttonRow}>
+          <Pressable style={[styles.secondaryButton, styles.flexButton]} onPress={() => { onReview?.(prompt.character, 'mnemonic', false); advance(); }}><Text style={styles.secondaryText}>Still learning</Text></Pressable>
+          <Pressable style={[styles.primary, styles.flexButton, { marginTop: 0, paddingVertical: 12 }]} onPress={() => { onReview?.(prompt.character, 'mnemonic', true); advance(); }}><Text style={styles.primaryText}>Remembered</Text></Pressable>
+        </View>
+      </>}
+      <Text style={styles.reading}>Kanji {itemIndex + 1} of {items.length}</Text>
+    </ScrollView>;
+  }
+  return <ScrollView scrollEnabled={!compact} contentContainerStyle={[styles.scroll, compact && styles.compactRecallScroll]}>
+    {!compact && <><Text style={styles.h1}>Recall the kanji</Text><Text style={styles.body}>Which kanji matches this keyword?</Text></>}
+    <Text style={styles.h2}>{prompt.keyword}</Text>
+    {!revealed && options.map(option => <Pressable key={option.character} style={[styles.answerOption, compact && styles.compactAnswerOption, answer === option.character && styles.answerOptionSelected]} onPress={() => setAnswer(option.character)}><Text style={[styles.answerKanji, compact && styles.compactAnswerKanji]}>{option.character}</Text></Pressable>)}
+    {!compact && !revealed && !answer && <Text style={styles.reading}>Choose a kanji to check your answer.</Text>}
     {revealed ? <View style={styles.feedback}><Text style={styles.feedbackTitle}>{answer === prompt.character ? 'Correct!' : `Not quite — the answer is ${prompt.character}.`}</Text><Text style={styles.quizKanji}>{prompt.character}</Text><Text style={styles.sectionLabel}>Mnemonic</Text><Text style={styles.body}>{prompt.mnemonic}</Text></View> : null}
-    <Pressable disabled={!revealed && !answer} style={[styles.primary, !revealed && !answer && styles.disabledButton]} onPress={revealed ? advance : () => setRevealed(true)}><Text style={styles.primaryText}>{revealed ? (onAdvance ? 'Next review' : 'Next kanji') : 'Check answer'}</Text></Pressable>
+    <Pressable disabled={!revealed && !answer} style={[styles.primary, compact && styles.compactPrimaryButton, !revealed && !answer && styles.disabledButton]} onPress={revealed ? advance : () => setRevealed(true)}><Text style={styles.primaryText}>{revealed ? (onAdvance ? 'Next review' : 'Next kanji') : 'Check answer'}</Text></Pressable>
     {!hideProgress && <Text style={styles.reading}>Kanji {itemIndex + 1} of {items.length}</Text>}
   </ScrollView>;
 }
 
-function PipelineScreen({ kanji, current, onReview, onOpenDeck, onOpenPractice }: { kanji: Kanji[]; current: Kanji; onReview: (character: string, skill: keyof KanjiProgress, passed: boolean, usedLifeline?: boolean) => void; onOpenDeck: () => void; onOpenPractice: () => void }) {
+function PipelineScreen({ kanji, onReview, onOpenDeck, onOpenPractice }: { kanji: Kanji[]; onReview: (character: string, skill: keyof KanjiProgress, passed: boolean, usedLifeline?: boolean) => void; onOpenDeck: () => void; onOpenPractice: () => void }) {
   type LearnSkill = 'mnemonic' | 'writing' | 'reading';
-  // Let new kanji enter the deck steadily while older ones advance into writing
-  // and reading practice. Missing stages are skipped until they unlock.
-  const cadence: LearnSkill[] = ['mnemonic', 'mnemonic', 'mnemonic', 'writing', 'mnemonic', 'writing', 'mnemonic', 'reading', 'writing'];
-  const [cadenceIndex, setCadenceIndex] = useState(0);
-  const dueCards: Record<LearnSkill, Kanji[]> = {
-    mnemonic: kanji.filter(k => k.status === 'new' && isDue(k, 'mnemonic')),
-    writing: kanji.filter(k => (k.status === 'unfamiliar' || k.status === 'mastered') && isDue(k, 'writing')),
-    reading: kanji.filter(k => (k.status === 'familiar' || k.status === 'mastered') && k.vocab.length > 0 && isDue(k, 'reading')),
+  type QueueItem = { skill: LearnSkill; card: Kanji };
+  const [session, setSession] = useState<{ label: 'reviews' | 'new'; items: QueueItem[] }>();
+  const [sessionIndex, setSessionIndex] = useState(0);
+  const dueReviews: QueueItem[] = [
+    ...kanji.filter(k => k.status === 'new' && ((k.progress?.mnemonic.successes ?? 0) > 0 || (k.progress?.mnemonic.lapses ?? 0) > 0) && isDue(k, 'mnemonic')).map(card => ({ skill: 'mnemonic' as const, card })),
+    ...kanji.filter(k => (k.status === 'unfamiliar' || k.status === 'mastered') && isDue(k, 'writing')).map(card => ({ skill: 'writing' as const, card })),
+    ...kanji.filter(k => (k.status === 'familiar' || k.status === 'mastered') && k.vocab.length > 0 && isDue(k, 'reading')).map(card => ({ skill: 'reading' as const, card })),
+  ].sort((a, b) => (a.card.progress?.[a.skill].nextReviewAt ?? 0) - (b.card.progress?.[b.skill].nextReviewAt ?? 0));
+  const newKanji = kanji.filter(k => k.status === 'new' && (k.progress?.mnemonic.successes ?? 0) === 0 && (k.progress?.mnemonic.lapses ?? 0) === 0 && isDue(k, 'mnemonic'));
+  const startSession = (label: 'reviews' | 'new', items: QueueItem[]) => { setSession({ label, items }); setSessionIndex(0); };
+  const advanceSession = (passed: boolean, usedLifeline = false) => {
+    const item = session?.items[sessionIndex];
+    if (!item) return;
+    onReview(item.card.character, item.skill, passed, usedLifeline);
+    setSessionIndex(index => index + 1);
   };
-  const cadenceOffset = Array.from({ length: cadence.length }, (_, offset) => (cadenceIndex + offset) % cadence.length);
-  const selectedCadenceIndex = cadenceOffset.find(index => dueCards[cadence[index]].length);
-  const nextSkill = selectedCadenceIndex === undefined ? undefined : cadence[selectedCadenceIndex];
-  const prompt = nextSkill ? dueCards[nextSkill][0] : undefined;
-  const review = (skill: LearnSkill, passed: boolean, usedLifeline = false) => {
-    if (!prompt) return;
-    setCadenceIndex(((selectedCadenceIndex ?? cadenceIndex) + 1) % cadence.length);
-    onReview(prompt.character, skill, passed, usedLifeline);
-  };
-
-  if (nextSkill === 'mnemonic' && prompt) return <MnemonicScreen key={`mnemonic-${prompt.character}`} current={current} kanji={[prompt]} studyMode onReview={(_, _skill, passed) => review('mnemonic', passed)} />;
-  if (nextSkill === 'writing' && prompt) return <View style={styles.content}><View style={styles.mixedHeader}><Text style={styles.reading}>Mixed learning · Writing practice</Text></View><WriteScreen key={`write-${prompt.character}`} current={prompt} next={() => {}} onReview={(passed, usedLifeline) => review('writing', passed, usedLifeline)} /></View>;
-  if (nextSkill === 'reading' && prompt) return <View style={styles.content}><View style={styles.mixedHeader}><Text style={styles.reading}>Mixed learning · Reading practice</Text></View><ReadingsScreen key={`read-${prompt.character}`} current={prompt} kanji={kanji} selected={0} hideScope onAdvance={(passed, usedLifeline) => review('reading', passed, usedLifeline)} /></View>;
+  const prompt = session?.items[sessionIndex];
+  if (session && !prompt) return <ScrollView contentContainerStyle={styles.scroll}>
+    <Text style={styles.h1}>Session complete</Text>
+    <Text style={styles.body}>You finished {session.items.length} {session.label === 'new' ? 'new kanji' : 'due reviews'}.</Text>
+    <Pressable style={styles.primary} onPress={() => { setSession(undefined); setSessionIndex(0); }}><Text style={styles.primaryText}>Back to study queues</Text></Pressable>
+  </ScrollView>;
+  if (session && prompt?.skill === 'mnemonic') return <View style={styles.content}><View style={styles.mixedHeader}><Text style={styles.reading}>{session.label === 'new' ? 'New kanji' : 'Due review'} · {sessionIndex + 1} of {session.items.length}</Text></View><MnemonicScreen key={`${session.label}-mnemonic-${prompt.card.character}`} current={prompt.card} kanji={[prompt.card]} studyMode onReview={(_, _skill, passed) => advanceSession(passed)} /></View>;
+  if (session && prompt?.skill === 'writing') return <View style={styles.content}><View style={styles.mixedHeader}><Text style={styles.reading}>Due review · Writing · {sessionIndex + 1} of {session.items.length}</Text></View><WriteScreen key={`write-${prompt.card.character}`} current={prompt.card} next={() => {}} onReview={(passed, usedLifeline) => advanceSession(passed, usedLifeline)} /></View>;
+  if (session && prompt?.skill === 'reading') return <View style={styles.content}><View style={styles.mixedHeader}><Text style={styles.reading}>Due review · Reading · {sessionIndex + 1} of {session.items.length}</Text></View><ReadingsScreen key={`read-${prompt.card.character}`} current={prompt.card} kanji={kanji} selected={0} hideScope onAdvance={(passed, usedLifeline) => advanceSession(passed, usedLifeline)} /></View>;
   const blockedReadingCards = kanji.filter(k => (k.status === 'familiar' || k.status === 'mastered') && k.vocab.length === 0);
   const now = Date.now();
   const upcoming = kanji.flatMap(card => {
@@ -353,9 +393,11 @@ function PipelineScreen({ kanji, current, onReview, onOpenDeck, onOpenPractice }
     return skills.map(skill => card.progress?.[skill].nextReviewAt ?? 0).filter(at => at > now);
   });
   const nextReviewAt = upcoming.length ? Math.min(...upcoming) : undefined;
-  return <ScrollView contentContainerStyle={styles.scroll}><Text style={styles.h1}>You’re caught up</Text><Text style={styles.body}>{nextReviewAt ? `Your next review is scheduled for ${new Date(nextReviewAt).toLocaleString()}.` : 'There are no scheduled reviews right now.'}</Text>
+  return <ScrollView contentContainerStyle={styles.scroll}><Text style={styles.h1}>Study</Text><Text style={styles.body}>Choose what you want to work on. Each session shows its queue and moves through the items in order.</Text>
+    <View style={styles.feedback}><Text style={styles.feedbackTitle}>Due reviews · {dueReviews.length}</Text><Text style={styles.body}>{dueReviews.length ? 'Review kanji ready for mnemonic, writing, or reading practice.' : nextReviewAt ? `Nothing due yet. Next review: ${new Date(nextReviewAt).toLocaleString()}.` : 'No reviews are due right now.'}</Text><Pressable disabled={!dueReviews.length} style={[styles.primary, !dueReviews.length && styles.disabledButton]} onPress={() => startSession('reviews', shuffled(dueReviews))}><Text style={styles.primaryText}>Start due reviews{dueReviews.length ? ` (${dueReviews.length})` : ''}</Text></Pressable></View>
+    <View style={styles.feedback}><Text style={styles.feedbackTitle}>New kanji · {newKanji.length}</Text><Text style={styles.body}>Try to recall each meaning before revealing its answer and mnemonic.</Text><Pressable disabled={!newKanji.length} style={[styles.primary, !newKanji.length && styles.disabledButton]} onPress={() => startSession('new', newKanji.map(card => ({ skill: 'mnemonic', card })))}><Text style={styles.primaryText}>Learn new kanji{newKanji.length ? ` (${newKanji.length})` : ''}</Text></Pressable></View>
     {blockedReadingCards.length > 0 && <View style={styles.feedback}><Text style={styles.feedbackTitle}>Reading reviews waiting for examples</Text><Text style={styles.body}>{blockedReadingCards.map(k => k.character).join('、')} {blockedReadingCards.length === 1 ? 'needs' : 'need'} vocabulary before reading practice can be scheduled. Add examples from the Deck tab.</Text><Pressable style={styles.secondaryButton} onPress={onOpenDeck}><Text style={styles.secondaryText}>Open deck</Text></Pressable></View>}
-    <Text style={styles.sectionLabel}>Keep practicing</Text><Text style={styles.body}>Choose a writing, reading, recall, or mixed practice session, or browse your kanji deck.</Text><Pressable style={styles.primary} onPress={onOpenPractice}><Text style={styles.primaryText}>Choose practice mode</Text></Pressable><Text style={styles.sectionLabel}>Study sequence</Text><Text style={styles.body}>Mnemonic → Writing → Readings → Mixed maintenance</Text></ScrollView>;
+    <Text style={styles.sectionLabel}>Keep practicing</Text><Text style={styles.body}>Choose a writing, reading, recall, or mixed practice session, or browse your kanji deck.</Text><Pressable style={styles.primary} onPress={onOpenPractice}><Text style={styles.primaryText}>Choose practice mode</Text></Pressable></ScrollView>;
 }
 
 type ReviewMode = 'write' | 'read' | 'mnemonic';
@@ -369,10 +411,10 @@ function PracticeScreen({ kanji, current, selected, next }: { kanji: Kanji[]; cu
     { id: 'mixed', label: 'Mixed' },
   ];
   return <View style={styles.content}>
-    <View style={styles.mixedHeader}><Text style={styles.h1}>Practice</Text><View style={styles.scopeRow}>{modes.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityState={{ selected: mode === item.id }} style={[styles.scopeButton, mode === item.id && styles.scopeButtonActive]} onPress={() => setMode(item.id)}><Text style={[styles.scopeText, mode === item.id && styles.scopeTextActive]}>{item.label}</Text></Pressable>)}</View></View>
+    <View style={styles.practiceHeader}><View style={styles.practiceModeRow}>{modes.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${item.label} practice`} accessibilityState={{ selected: mode === item.id }} style={[styles.practiceModeButton, mode === item.id && styles.scopeButtonActive]} onPress={() => setMode(item.id)}><Text style={[styles.practiceModeText, mode === item.id && styles.scopeTextActive]}>{item.label}</Text></Pressable>)}</View></View>
     <View style={styles.content}>
       {mode === 'write' && <WriteScreen current={current} next={next} />}
-      {mode === 'read' && <ReadingsScreen current={current} kanji={kanji} selected={selected} />}
+      {mode === 'read' && <ReadingsScreen current={current} kanji={kanji} selected={selected} compact />}
       {mode === 'mnemonic' && <MnemonicScreen current={current} kanji={kanji} />}
       {mode === 'mixed' && <MixedReviewScreen kanji={kanji} />}
     </View>
@@ -393,10 +435,10 @@ function MixedReviewScreen({ kanji, onReview }: { kanji: Kanji[]; onReview?: (ch
   if (!prompt) return <ScrollView contentContainerStyle={styles.scroll}><Text style={styles.h1}>Mixed review</Text><Text style={styles.body}>Add kanji to begin a mixed review session.</Text></ScrollView>;
 
   return <View style={styles.content}>
-    <View style={styles.mixedHeader}><Text style={styles.h1}>Mixed review</Text><Text style={styles.reading}>{mode === 'write' ? 'Writing practice' : mode === 'read' ? 'Reading practice' : 'Mnemonic recall'}{onReview ? ' · Mastered' : ''} · Kanji {(sessionIndex % deckOrder.length) + 1} of {deckOrder.length}</Text></View>
-    {mode === 'write' && <WriteScreen key={`write-${sessionIndex}`} current={prompt} next={advance} onReview={onReview ? (passed, usedLifeline) => onReview(prompt.character, 'writing', passed, usedLifeline) : undefined} />}
-    {mode === 'read' && <ReadingsScreen key={`read-${sessionIndex}`} current={prompt} kanji={kanji} selected={0} hideScope onAdvance={(passed, usedLifeline) => { onReview?.(prompt.character, 'reading', passed, usedLifeline); advance(); }} />}
-    {mode === 'mnemonic' && <MnemonicScreen key={`mnemonic-${sessionIndex}`} current={prompt} kanji={kanji} fixedPrompt={prompt} hideProgress onAdvance={advance} />}
+    <View style={styles.mixedCompactHeader}><Text style={styles.mixedCompactTitle}>Mixed · {mode === 'write' ? 'Writing' : mode === 'read' ? 'Readings' : 'Recall'}</Text><Text style={styles.mixedCompactProgress}>{onReview ? 'Mastered · ' : ''}Kanji {(sessionIndex % deckOrder.length) + 1} of {deckOrder.length}</Text></View>
+    {mode === 'write' && <WriteScreen key={`write-${sessionIndex}`} current={prompt} next={advance} compact />}
+    {mode === 'read' && <ReadingsScreen key={`read-${sessionIndex}`} current={prompt} kanji={kanji} selected={0} hideScope compact onAdvance={(passed, usedLifeline) => { onReview?.(prompt.character, 'reading', passed, usedLifeline); advance(); }} />}
+    {mode === 'mnemonic' && <MnemonicScreen key={`mnemonic-${sessionIndex}`} current={prompt} kanji={kanji} fixedPrompt={prompt} hideProgress compact onAdvance={advance} />}
   </View>;
 }
 
@@ -410,11 +452,11 @@ function SettingsScreen({ onAdd }: { onAdd: (k: Kanji) => void }) {
   const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f1f7fb' },
   header: { paddingHorizontal: 20, paddingTop: 14, paddingBottom: 10 }, title: { fontSize: 28, fontWeight: '800', color: '#17324d' }, subtitle: { color: '#64829a', marginTop: 3 },
-  content: { flex: 1 }, scroll: { padding: 20, paddingBottom: 32 }, h1: { fontSize: 24, fontWeight: '800', marginBottom: 8, color: '#17324d' }, h2: { fontSize: 20, fontWeight: '700', marginBottom: 8, color: '#17324d' }, body: { fontSize: 16, lineHeight: 24, color: '#4e4a45' },
+  content: { flex: 1 }, scroll: { padding: 20, paddingBottom: 32 }, compactReading: { padding: 12, paddingBottom: 16 }, compactScopeRow: { gap: 6, marginBottom: 6 }, compactScopeButton: { paddingVertical: 6, borderRadius: 9 }, compactScopeText: { fontSize: 11 }, compactReadingWord: { fontSize: 68, textAlign: 'center', marginVertical: 4, fontWeight: '700' }, compactAnswerOption: { padding: 8, marginTop: 5 }, compactWritingScroll: { paddingHorizontal: 12, paddingTop: 4, paddingBottom: 6 }, compactWritingPrompt: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 4 }, compactWritingKeyword: { fontSize: 16, fontWeight: '700', color: '#17324d' }, compactDrawingPad: { height: 196, marginTop: 8 }, compactWritingStatus: { fontSize: 13, lineHeight: 18 }, compactWriteFooter: { paddingHorizontal: 12, paddingTop: 2, paddingBottom: 6 }, compactButtonRow: { gap: 8, marginTop: 4 }, compactActionButton: { paddingVertical: 8 }, compactPrimaryButton: { paddingVertical: 10 }, compactRecallScroll: { padding: 12, paddingBottom: 10 }, compactAnswerKanji: { fontSize: 32 }, mixedCompactHeader: { paddingHorizontal: 16, paddingTop: 5, paddingBottom: 3 }, mixedCompactTitle: { fontSize: 14, fontWeight: '800', color: '#17324d' }, mixedCompactProgress: { fontSize: 12, color: '#6d6a64' }, h1: { fontSize: 24, fontWeight: '800', marginBottom: 8, color: '#17324d' }, h2: { fontSize: 20, fontWeight: '700', marginBottom: 8, color: '#17324d' }, body: { fontSize: 16, lineHeight: 24, color: '#4e4a45' },
   sectionLabel: { marginTop: 20, marginBottom: 8, fontWeight: '800', color: '#5486a8', textTransform: 'uppercase', fontSize: 12, letterSpacing: 1 }, statsRow: { flexDirection: 'row', gap: 8 }, stat: { flex: 1, backgroundColor: '#e7f3fb', borderRadius: 14, padding: 10, alignItems: 'center' }, statNum: { fontSize: 22, fontWeight: '800' }, statLabel: { fontSize: 11, color: '#777', textTransform: 'capitalize' },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, kanjiCard: { width: '47%', backgroundColor: '#fff', borderRadius: 16, padding: 14, borderWidth: 1, borderColor: '#d5e7f3' }, kanjiCardSelected: { borderWidth: 2, borderColor: '#62a9d8', backgroundColor: '#edf7fd' }, kanji: { fontSize: 42, fontWeight: '700' }, keyword: { fontWeight: '700', marginTop: 4 }, status: { color: '#888', marginTop: 5, textTransform: 'capitalize' }, detailCard: { marginTop: 14, backgroundColor: '#f8fbfe', borderRadius: 18, padding: 18 }, bigKanji: { fontSize: 78, fontWeight: '700', textAlign: 'center', marginVertical: 8 },
   statusRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 16 }, pill: { paddingVertical: 8, paddingHorizontal: 11, borderRadius: 999, backgroundColor: '#e2f0f9' }, pillActive: { backgroundColor: '#c8e7f8' }, pillText: { fontSize: 12, fontWeight: '700' }, vocabEditorRow: { marginTop: 14, padding: 12, backgroundColor: '#fff', borderRadius: 12 }, vocabEditorInput: { marginTop: 8 }, removeText: { color: '#9b3f38', fontWeight: '700', paddingTop: 10 }, flexButton: { flex: 1 },
-  drawingPad: { height: 320, marginTop: 20, backgroundColor: '#fff', borderRadius: 18, borderWidth: 1, borderColor: '#c9dfed', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }, drawingGuide: { fontSize: 230, color: '#dedbd5', fontWeight: '400', includeFontPadding: false }, drawingAnswer: { color: '#1d1d1f' }, inkDot: { position: 'absolute', width: 16, height: 16, borderRadius: 8, backgroundColor: '#34312d' }, buttonRow: { flexDirection: 'row', gap: 10, marginTop: 12 }, lifelineButton: { marginTop: 8 }, secondaryButton: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: '#e2f0f9', alignItems: 'center' }, secondaryText: { color: '#1d1d1f', fontWeight: '700' }, primary: { marginTop: 18, backgroundColor: '#398fc5', paddingVertical: 14, borderRadius: 14, alignItems: 'center' }, disabledButton: { opacity: 0.45 }, primaryText: { color: '#fff', fontSize: 16, fontWeight: '800' }, mixedHeader: { paddingHorizontal: 20, paddingTop: 20 }, mixedNext: { marginHorizontal: 20, marginBottom: 20, backgroundColor: '#398fc5', paddingVertical: 14, borderRadius: 14, alignItems: 'center' },
+  drawingPad: { height: 320, marginTop: 20, backgroundColor: '#fff', borderRadius: 18, borderWidth: 1, borderColor: '#c9dfed', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }, drawingGuide: { fontSize: 230, color: '#dedbd5', fontWeight: '400', includeFontPadding: false }, drawingAnswer: { color: '#1d1d1f' }, inkDot: { position: 'absolute', width: 16, height: 16, borderRadius: 8, backgroundColor: '#34312d' }, buttonRow: { flexDirection: 'row', gap: 10, marginTop: 12 }, writeFooter: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 12, backgroundColor: '#fff' }, practiceHeader: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 2 }, practiceModeRow: { flexDirection: 'row', gap: 6 }, practiceModeButton: { flex: 1, backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd5ca', borderRadius: 10, paddingVertical: 7, alignItems: 'center' }, practiceModeText: { fontSize: 12, color: '#4e4a45', fontWeight: '700' }, lifelineButton: { marginTop: 8 }, secondaryButton: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: '#e2f0f9', alignItems: 'center' }, secondaryText: { color: '#1d1d1f', fontWeight: '700' }, primary: { marginTop: 18, backgroundColor: '#398fc5', paddingVertical: 14, borderRadius: 14, alignItems: 'center' }, disabledButton: { opacity: 0.45 }, primaryText: { color: '#fff', fontSize: 16, fontWeight: '800' }, mixedHeader: { paddingHorizontal: 20, paddingTop: 20 }, mixedNext: { marginHorizontal: 20, marginBottom: 20, backgroundColor: '#398fc5', paddingVertical: 14, borderRadius: 14, alignItems: 'center' },
   quizKanji: { fontSize: 120, textAlign: 'center', marginVertical: 18, fontWeight: '700' }, answerKanji: { fontSize: 42, fontWeight: '700', color: '#1d1d1f', textAlign: 'center' }, readingBox: { backgroundColor: '#f4f9fd', borderRadius: 16, padding: 16 }, vocabCard: { backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 10 }, vocabWord: { fontSize: 22, fontWeight: '800' }, reading: { fontSize: 15, color: '#6d6a64', marginVertical: 2 }, mnemonicCard: { backgroundColor: '#eaf5fc', borderRadius: 18, padding: 20, marginTop: 10 }, feedback: { backgroundColor: '#f7fbfe', borderRadius: 16, padding: 16, marginTop: 14 }, feedbackTitle: { fontSize: 17, fontWeight: '800', color: '#1d1d1f', marginBottom: 8 }, meaningClue: { fontSize: 17, fontWeight: '700', color: '#4e4a45', marginBottom: 12 },
   answerOption: { backgroundColor: '#f8fbfe', borderRadius: 12, borderWidth: 1, borderColor: '#cfe2ef', padding: 14, marginTop: 8 }, answerOptionSelected: { borderColor: '#1d1d1f', backgroundColor: '#eee9e1' }, scopeRow: { flexDirection: 'row', gap: 8, marginBottom: 14 }, scopeButton: { flex: 1, backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd5ca', borderRadius: 12, paddingVertical: 11, alignItems: 'center' }, scopeButtonActive: { backgroundColor: '#398fc5', borderColor: '#398fc5' }, scopeText: { fontSize: 13, color: '#4e4a45', fontWeight: '700' }, scopeTextActive: { color: '#fff' }, input: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd5ca', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16 }, answerInput: { marginTop: 16 }, multiline: { minHeight: 120, textAlignVertical: 'top' }, navShell: { height: 49, backgroundColor: '#eaf4fb', borderTopWidth: 1, borderTopColor: '#d6e8f4' }, navScroll: { flexGrow: 0, flexShrink: 0, height: 48 }, nav: { flexDirection: 'row' }, navButton: { minWidth: 78, height: 48, justifyContent: 'center', alignItems: 'center' }, navButtonActive: { backgroundColor: '#cfeafa', borderRadius: 12 }, navText: { fontSize: 11, color: '#64829a' }, navTextActive: { color: '#1e6697', fontWeight: '800' }
 });
